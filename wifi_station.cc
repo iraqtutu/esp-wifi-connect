@@ -91,11 +91,11 @@ void WifiStation::Start() {
                                                         &WifiStation::IpEventHandler,
                                                         this,
                                                         &instance_got_ip_));
-    // ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-    //                                                     IP_EVENT_GOT_IP6,
-    //                                                     &WifiStation::Ipv6EventHandler,
-    //                                                     this,
-    //                                                     &instance_got_ip6_));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_GOT_IP6,
+                                                        &WifiStation::Ipv6EventHandler,
+                                                        this,
+                                                        &instance_got_ip6_));
 
     // Create the default event loop
     esp_netif_create_default_wifi_sta();
