@@ -32,6 +32,7 @@ WifiConfigurationAp& WifiConfigurationAp::GetInstance() {
 WifiConfigurationAp::WifiConfigurationAp()
 {
     event_group_ = xEventGroupCreate();
+    language_ = "zh-CN";
 }
 
 WifiConfigurationAp::~WifiConfigurationAp()
@@ -50,6 +51,11 @@ WifiConfigurationAp::~WifiConfigurationAp()
     if (instance_got_ip_) {
         esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip_);
     }
+}
+
+void WifiConfigurationAp::SetLanguage(const std::string &&language)
+{
+    language_ = language;
 }
 
 void WifiConfigurationAp::SetSsidPrefix(const std::string &&ssid_prefix)
@@ -148,6 +154,11 @@ void WifiConfigurationAp::StartAccessPoint()
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_ERROR_CHECK(esp_wifi_start());
+
+#ifdef CONFIG_SOC_WIFI_SUPPORT_5G
+    // Temporarily use only 2.4G Wi-Fi.
+    ESP_ERROR_CHECK(esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY));
+#endif
 
     ESP_LOGI(TAG, "Access Point started with SSID %s", ssid.c_str());
 }
@@ -333,15 +344,13 @@ void WifiConfigurationAp::StartWebServer()
 
             // 获取当前对象
             auto *this_ = static_cast<WifiConfigurationAp *>(req->user_ctx);
-            // 不管密码对错都先保存,解决无法连接手机热点的问题
-            this_->Save(ssid_str, password_str);
             if (!this_->ConnectToWifi(ssid_str, password_str)) {
                 cJSON_Delete(json);
                 httpd_resp_send(req, "{\"success\":false,\"error\":\"无法连接到 WiFi\"}", HTTPD_RESP_USE_STRLEN);
                 return ESP_OK;
             }
 
-            // this_->Save(ssid_str, password_str);
+            this_->Save(ssid_str, password_str);
             cJSON_Delete(json);
             // 设置成功响应
             httpd_resp_set_type(req, "application/json");
@@ -401,7 +410,7 @@ void WifiConfigurationAp::StartWebServer()
 
     auto captive_portal_handler = [](httpd_req_t *req) -> esp_err_t {
         auto *this_ = static_cast<WifiConfigurationAp *>(req->user_ctx);
-        std::string url = this_->GetWebServerUrl() + "/";
+        std::string url = this_->GetWebServerUrl() + "/?lang=" + this_->language_;
         // Set content type to prevent browser warnings
         httpd_resp_set_type(req, "text/html");
         httpd_resp_set_status(req, "302 Found");

@@ -8,6 +8,7 @@
 #include <esp_event.h>
 #include <esp_timer.h>
 #include <esp_wifi_types_generic.h>
+#include <esp_netif.h>
 
 struct WifiApRecord {
     std::string ssid;
@@ -28,14 +29,14 @@ public:
     int8_t GetRssi();
     std::string GetSsid() const { return ssid_; }
     std::string GetIpAddress() const { return ip_address_; }
-    std::string GetIpv6Address() const { return ipv6_address_; }
-    bool HasGlobalIpv6() const { return has_global_ipv6_; }
     uint8_t GetChannel();
     void SetPowerSaveMode(bool enabled);
+    void PrintIPv6Status();
 
     void OnConnect(std::function<void(const std::string& ssid)> on_connect);
     void OnConnected(std::function<void(const std::string& ssid)> on_connected);
     void OnScanBegin(std::function<void()> on_scan_begin);
+    void ProcessScanResult();
 
 private:
     WifiStation();
@@ -47,12 +48,9 @@ private:
     esp_timer_handle_t timer_handle_ = nullptr;
     esp_event_handler_instance_t instance_any_id_ = nullptr;
     esp_event_handler_instance_t instance_got_ip_ = nullptr;
-    esp_event_handler_instance_t instance_got_ip6_ = nullptr;
     std::string ssid_;
     std::string password_;
     std::string ip_address_;
-    std::string ipv6_address_;
-    bool has_global_ipv6_ = false;
     int reconnect_count_ = 0;
     std::function<void(const std::string& ssid)> on_connect_;
     std::function<void(const std::string& ssid)> on_connected_;
@@ -63,7 +61,17 @@ private:
     void StartConnect();
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
     static void IpEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
-    static void Ipv6EventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
+    static bool netif_desc_matches_with(esp_netif_t *netif, void *ctx);
+    static esp_netif_t *get_example_netif_from_desc(const char *desc);
+    static void example_handler_on_wifi_disconnect(void *arg, esp_event_base_t event_base,
+        int32_t event_id, void *event_data);
+    static void example_handler_on_wifi_connect(void *esp_netif, esp_event_base_t event_base,
+        int32_t event_id, void *event_data);
+    static void example_handler_on_sta_got_ip(void *arg, esp_event_base_t event_base,
+        int32_t event_id, void *event_data);
+    static void example_handler_on_sta_got_ipv6(void *arg, esp_event_base_t event_base,
+        int32_t event_id, void *event_data);
+    static void example_wifi_shutdown(void);
 };
 
 #endif // _WIFI_STATION_H_
