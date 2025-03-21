@@ -71,7 +71,10 @@ private:
         int32_t event_id, void *event_data);
     static void example_handler_on_sta_got_ipv6(void *arg, esp_event_base_t event_base,
         int32_t event_id, void *event_data);
-    static void example_wifi_shutdown(void);
+    void example_wifi_shutdown(void);
+    void RegisterEventHandlers();
+    void UnregisterEventHandlers();
+    void SetConnectedFlag();
 };
 
 #endif // _WIFI_STATION_H_
