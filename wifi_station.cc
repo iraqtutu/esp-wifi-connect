@@ -35,6 +35,7 @@ static const char *example_ipv6_addr_types_to_str[] = {
 #define MAX_RECONNECT_COUNT 5
 
 static int s_retry_num = 0;
+static volatile bool isconnected = false;
 static esp_netif_t *wifi_sta_netif = NULL;
 // 新增一个队列来处理扫描结果，避免在事件处理函数中直接处理
 static QueueHandle_t s_scan_event_queue = NULL;
@@ -122,25 +123,29 @@ void WifiStation::OnConnected(std::function<void(const std::string& ssid)> on_co
 
 void WifiStation::RegisterEventHandlers() {
     // 先注销之前可能存在的事件处理程序
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START, &WifiStation::WifiEventHandler, this));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, &WifiStation::WifiEventHandler, this));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &WifiStation::example_handler_on_wifi_disconnect, this));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &WifiStation::example_handler_on_sta_got_ip, this));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &WifiStation::example_handler_on_wifi_connect, this));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_GOT_IP6, &WifiStation::example_handler_on_sta_got_ipv6, this));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_START, &WifiEventHandler, this));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, &WifiEventHandler, this));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &example_handler_on_wifi_disconnect, this));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &example_handler_on_sta_got_ip, this));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &example_handler_on_wifi_connect, wifi_sta_netif));
+#if CONFIG_LWIP_IPV6
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_GOT_IP6, &example_handler_on_sta_got_ipv6, this));
+#endif
 }
 
 void WifiStation::UnregisterEventHandlers() {
     // 注销特定事件处理程序，以避免与通用处理程序冲突
-    esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_START, &WifiStation::WifiEventHandler);
-    esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, &WifiStation::WifiEventHandler);
-    esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &WifiStation::example_handler_on_wifi_disconnect);
-    esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &WifiStation::example_handler_on_sta_got_ip);
-    esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &WifiStation::example_handler_on_wifi_connect);
-    esp_event_handler_unregister(IP_EVENT, IP_EVENT_GOT_IP6, &WifiStation::example_handler_on_sta_got_ipv6);
+    ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_START, &WifiEventHandler));
+    ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE, &WifiEventHandler));
+    ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &example_handler_on_wifi_disconnect));
+    ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &example_handler_on_sta_got_ip));
+    ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &example_handler_on_wifi_connect));
+#if CONFIG_LWIP_IPV6
+    ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_GOT_IP6, &example_handler_on_sta_got_ipv6));
+#endif
 }
 
-// 启动WiFi
+// 启动WiFi，最重要的调用入口
 void WifiStation::Start() {
     ESP_LOGI(TAG, "WiFi STA initialization starting");
 #ifdef CONFIG_LWIP_IPV6
@@ -281,7 +286,8 @@ bool WifiStation::WaitForConnected(int timeout_ms) {
     int elapsed = 0;
     int check_interval = 100; // 每100ms检查一次
     while (elapsed < timeout_ms) {
-        if (IsConnected()) {
+        if (isconnected) {
+            // ESP_LOGI(TAG, "WiFi连接成功,返回主板逻辑");
             return true;
         }
         vTaskDelay(check_interval / portTICK_PERIOD_MS);
@@ -414,13 +420,8 @@ void WifiStation::StartConnect() {
     }
 #endif
     s_retry_num = 0;
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &example_handler_on_wifi_disconnect, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &example_handler_on_sta_got_ip, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_CONNECTED, &example_handler_on_wifi_connect, wifi_sta_netif));
-#if CONFIG_LWIP_IPV6
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_GOT_IP6, &example_handler_on_sta_got_ipv6, NULL));
-#endif
-
+    UnregisterEventHandlers();
+    RegisterEventHandlers();
     ESP_LOGI(TAG, "Connecting to %s...", wifi_config.sta.ssid);
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     esp_err_t ret = esp_wifi_connect();
@@ -432,15 +433,17 @@ void WifiStation::StartConnect() {
     // 死等IP
     ESP_LOGI(TAG, "Waiting for IP(s)");
 #if CONFIG_LWIP_IPV4
-    xSemaphoreTake(s_semph_get_ip_addrs, portMAX_DELAY);
+    if (xSemaphoreTake(s_semph_get_ip_addrs, pdMS_TO_TICKS(10000)) != pdTRUE) {
+        ESP_LOGW(TAG, "IPv4地址等待超时，继续执行");
+    }
 #endif
 #if CONFIG_LWIP_IPV6
-    xSemaphoreTake(s_semph_get_ip6_addrs, portMAX_DELAY);
-#endif
-    if (s_retry_num > 6) {
-        ESP_LOGE(TAG, "Waiting for IP(s) timeout");
+    if (xSemaphoreTake(s_semph_get_ip6_addrs, pdMS_TO_TICKS(10000)) != pdTRUE) {
+        ESP_LOGW(TAG, "IPv6地址等待超时，继续执行");
     }
-    
+#endif 
+    ESP_LOGI(TAG, "等待IP地址完成");
+    isconnected = true;
     return;
 }
 
@@ -463,11 +466,7 @@ uint8_t WifiStation::GetChannel() {
 // 检查WiFi连接状态
 bool WifiStation::IsConnected() {
     // 检查WiFi连接状态和IP地址获取状态
-    wifi_ap_record_t ap_info;
-    bool wifi_connected = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
-    // bool has_ip = !ip_address_.empty()
-    // ESP_LOGI(TAG, "IsConnected: %d", wifi_connected);
-    return wifi_connected;
+    return isconnected;
 }
 
 // 设置WiFi省电模式
@@ -516,73 +515,6 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
     }
 }
 
-// 准备废弃
-void WifiStation::IpEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    auto* this_ = static_cast<WifiStation*>(arg);
-    if (this_ == nullptr) {
-        ESP_LOGE(TAG, "IpEventHandler: Invalid argument");
-        return;
-    }
-    
-    if (event_id == IP_EVENT_STA_GOT_IP) {
-        // 处理IPv4地址
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*)event_data;
-        char ip_address[16]; // 足够容纳IPv4地址
-        
-        // 将IPv4地址转换为字符串
-        sprintf(ip_address, IPSTR, IP2STR(&event->ip_info.ip));
-        this_->ip_address_ = ip_address;
-        
-        ESP_LOGI(TAG, "Got IPv4 address: %s", this_->ip_address_.c_str());
-        this_->SetConnectedFlag();
-    } else if (event_id == IP_EVENT_GOT_IP6) {
-        // 处理IPv6地址
-        ip_event_got_ip6_t* event = (ip_event_got_ip6_t*)event_data;
-        char ip_address[48]; // 足够容纳IPv6地址
-        
-        // 将IPv6地址转换为字符串
-        esp_ip6_addr_type_t ipv6_type = esp_netif_ip6_get_addr_type(&event->ip6_info.ip);
-        
-        // 修改：接受更多类型的IPv6地址，不仅限于全局地址
-        // 接受全局地址、唯一本地地址和站点本地地址，这些地址都可用于通信
-        if (ipv6_type == ESP_IP6_ADDR_IS_GLOBAL || 
-            ipv6_type == ESP_IP6_ADDR_IS_UNIQUE_LOCAL || 
-            ipv6_type == ESP_IP6_ADDR_IS_SITE_LOCAL) {
-            
-            // 使用ESP-IDF提供的宏来格式化IPv6地址字符串
-            snprintf(ip_address, sizeof(ip_address), IPV6STR, IPV62STR(event->ip6_info.ip));
-            this_->ip_address_ = ip_address;
-            this_->SetConnectedFlag();
-            ESP_LOGI(TAG, "Got usable IPv6 address (type: %s): %s", 
-                    example_ipv6_addr_types_to_str[ipv6_type], this_->ip_address_.c_str());
-        } else if (ipv6_type == ESP_IP6_ADDR_IS_LINK_LOCAL && this_->ip_address_.empty()) {
-            // 如果没有其他IPv6地址，也可以使用链路本地地址
-            snprintf(ip_address, sizeof(ip_address), IPV6STR, IPV62STR(event->ip6_info.ip));
-            this_->ip_address_ = ip_address;
-            this_->SetConnectedFlag();
-            ESP_LOGI(TAG, "Using link-local IPv6 address: %s", this_->ip_address_.c_str());
-        } else {
-            // 记录其他类型的IPv6地址但不设置为主地址
-            snprintf(ip_address, sizeof(ip_address), IPV6STR, IPV62STR(event->ip6_info.ip));
-            ESP_LOGI(TAG, "Got IPv6 address (type: %s): %s", 
-                    example_ipv6_addr_types_to_str[ipv6_type], ip_address);
-        }
-    }
-}
-
-// 设置连接状态位
-void WifiStation::SetConnectedFlag() {
-    if (event_group_ != nullptr) {
-        EventBits_t bits = xEventGroupGetBits(event_group_);
-        if ((bits & WIFI_EVENT_CONNECTED) == 0) {
-            xEventGroupSetBits(event_group_, WIFI_EVENT_CONNECTED);
-            ESP_LOGI(TAG, "WiFi连接状态位已设置");
-        }
-    } else {
-        ESP_LOGE(TAG, "事件组未初始化，无法设置连接状态");
-    }
-}
-
 // 在函数外部定义一个全局的辅助函数
 static esp_err_t example_wifi_sta_do_disconnect(void) {
     return ESP_OK;
@@ -592,7 +524,7 @@ void WifiStation::example_handler_on_wifi_disconnect(void *arg, esp_event_base_t
                                int32_t event_id, void *event_data)
 {
     WifiStation* this_ = static_cast<WifiStation*>(arg);
-    
+    isconnected = false;
     ESP_LOGI(TAG, "WIFI_EVENT_STA_DISCONNECTED received");
     if (this_->IsConnected()) {
         xEventGroupClearBits(this_->event_group_, WIFI_EVENT_CONNECTED);
@@ -604,9 +536,11 @@ void WifiStation::example_handler_on_wifi_disconnect(void *arg, esp_event_base_t
         /* let example_wifi_sta_do_connect() return */
         if (s_semph_get_ip_addrs) {
             xSemaphoreGive(s_semph_get_ip_addrs);
+            // ESP_LOGI(TAG, "Give semaphore for IPv4");
         }
         if (s_semph_get_ip6_addrs) {
             xSemaphoreGive(s_semph_get_ip6_addrs);
+            // ESP_LOGI(TAG, "Give semaphore for IPv6");
         }
         ::example_wifi_sta_do_disconnect();  // 修改为调用全局函数
         return;
@@ -712,11 +646,15 @@ void WifiStation::example_handler_on_sta_got_ipv6(void *arg, esp_event_base_t ev
         return;
     }
     if (s_semph_get_ip6_addrs) {
+        // ESP_LOGI(TAG, "Give semaphore for IPv6");
         xSemaphoreGive(s_semph_get_ip6_addrs);
+        isconnected = true;
     }
     esp_ip6_addr_type_t ipv6_type = esp_netif_ip6_get_addr_type(&event->ip6_info.ip);
     ESP_LOGI(TAG, "Got IPv6 event: Interface \"%s\" address: " IPV6STR ", type: %s", esp_netif_get_desc(event->esp_netif),
              IPV62STR(event->ip6_info.ip), example_ipv6_addr_types_to_str[ipv6_type]);
+    // 让出CPU时间片
+    taskYIELD();
 }
 
 // 修改为全局函数
@@ -752,6 +690,7 @@ void WifiStation::ProcessScanResult() {
     HandleScanResult(); // 调用原函数，但在一个有足够栈空间的专用任务中
 }
 
+// 打印IPv6状态，用于调试
 void WifiStation::PrintIPv6Status() {
     if (!IsConnected()) {
         ESP_LOGI(TAG, "WiFi not connected, cannot get IPv6 status");
